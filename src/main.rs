@@ -1,18 +1,24 @@
 mod server;
+mod auth;
 
-use std::net::TcpListener;
+use std::fs::File;
 
-fn main() {
-    
-    let listener = TcpListener::bind("localhost:0").unwrap();
+use serde::Deserialize;
 
-    let addr = listener.local_addr().unwrap();
+#[derive(Deserialize)]
+struct Config {
+    client_id: String,
+    client_secret: String
+}
 
-    std::mem::drop(listener);
+fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
+    let config: Config = serde_json::from_reader(File::open("config.json")?)?;
 
-    println!("listening on {}", addr);
-    
-    if let Ok((code, state)) = server::serve_request(addr.to_string().as_str()) {
-        println!("get code {} and state {}", code, state);
-    }
+    let scope = "user-library-read playlist-read-private user-library-modify playlist-modify-private playlist-modify-public";
+    let client_id = config.client_id.as_str();
+
+    let (code, state) = auth::authenticate(client_id, scope).unwrap();
+
+
+    Ok(())
 }
