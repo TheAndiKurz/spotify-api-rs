@@ -27,7 +27,7 @@ fn generate_random_string(len: usize) -> String {
 
 const CUSTOM_ENGINE: general_purpose::GeneralPurpose = general_purpose::GeneralPurpose::new(&alphabet::URL_SAFE, general_purpose::NO_PAD);
 
-fn oauth2(client_id: &str, scope: &str, code_verifier: &str) -> Result<String, Box<dyn std::error::Error>>{
+fn oauth2(client_id: &str, scope: &str, code_verifier: &str) -> Result<AuthData, Box<dyn std::error::Error>>{
     let sha_output = Sha256::digest(code_verifier.as_bytes());
     let sha_hashed_bytes = sha_output.as_slice();
     let code_challenge = CUSTOM_ENGINE.encode(sha_hashed_bytes);
@@ -60,53 +60,20 @@ fn oauth2(client_id: &str, scope: &str, code_verifier: &str) -> Result<String, B
         }
     }
 
-    code.ok_or("code not found".into())
-}
-
-fn store(code: &str, scope: &str, code_verifier: &str) -> Result<AuthData, Box<dyn std::error::Error>>{
-    let data = AuthData {
-        code: code.to_owned(),
-        scope: scope.to_owned(),
-        code_verifier: code_verifier.to_owned()
-    };
-
-    let json = serde_json::to_string(&data)?;
-
-    File::create(SECRET_FILE_NAME)?.write_all(json.as_bytes())?;
-
-    Ok(data)
-}
-
-fn load(scope: &str) -> Result<AuthData, Box<dyn std::error::Error>> {
-    if !Path::new(SECRET_FILE_NAME).exists() {
-        return Err("file does not exist".into());
+    match code {
+        Some(c) => Ok(AuthData {
+            code: c,
+            scope: scope.into(),
+            code_verifier: code_verifier.into()
+        }),
+        None => Err("no code found".into())
     }
-
-
-    let mut contents = String::new();
-    File::open(SECRET_FILE_NAME)?.read_to_string(&mut contents)?;
-
-    let data: AuthData = serde_json::from_str(contents.as_str())?;
-
-    if data.scope != scope {
-        return Err("scope needs to be the same or else you need to reverify".into());
-    }
-
-    Ok(data)
 }
-
 
 fn authenticate(client_id: &str, scope: &str) -> Result<AuthData, Box<dyn std::error::Error>> {
-    match load(scope) {
-        Ok(succ) => Ok(succ),
-        Err(err) => {
-            eprintln!("was not able to load authentication: {}", err);
-            let code_verifier = generate_random_string(64);
-            let succ = oauth2(client_id, scope, &code_verifier)?;
-            let data = store(&succ, scope, &code_verifier)?;
-            Ok(data)
-        }
-    }
+    let code_verifier = generate_random_string(64);
+    let auth = oauth2(client_id, scope, &code_verifier)?;
+    Ok(auth)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -118,18 +85,35 @@ struct TokenResponse {
     refresh_token: String
 }
 
-pub fn get_token(client_id: &str, client_secret: &str, scope: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let data = authenticate(client_id, scope)?;
+#[derive(Serialize, Deserialize)]
+pub struct Token {
+    pub access_token: String,
+    expires_at: std::time::SystemTime,
+    refresh_token: String
+}
 
+fn load_token() -> Result<Token, Box<dyn std::error::Error>> {
+    let mut contents = String::new();
+    File::open("token.json")?.read_to_string(&mut contents)?;
+
+    let token: Token = serde_json::from_str(contents.as_str())?;
+
+    Ok(token)
+}
+
+fn store_token(token: &Token) -> Result<(), Box<dyn std::error::Error>> {
+    let json = serde_json::to_string(token)?;
+
+    File::create("token.json")?.write_all(json.as_bytes())?;
+
+    Ok(())
+}
+
+fn get_token_from_refresh(client_id: &str, client_secret: &str, refresh_token: &str) -> Result<Token, Box<dyn std::error::Error>> {
     let client = reqwest::blocking::Client::new();
     let token_response = client.post("https://accounts.spotify.com/api/token")
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", data.code.as_str()),
-            ("code_verifier", data.code_verifier.as_str()),
-            ("redirect_uri", REDIRECT_URI),
-        ])
-        .basic_auth(client_id, Some(client_secret))
+        .body(format!("grant_type=refresh_token&refresh_token={}&client_id={}", refresh_token, client_id))
+        .bearer_auth(refresh_token)
         .send()?;
 
     if token_response.status().is_client_error() {
@@ -145,5 +129,67 @@ pub fn get_token(client_id: &str, client_secret: &str, scope: &str) -> Result<St
 
     let token: TokenResponse = serde_json::from_str(token.as_str())?;
 
-    Ok(token.access_token)
+    let expires_at = std::time::SystemTime::now().checked_add(std::time::Duration::from_secs(token.expires_in)).unwrap();
+
+    Ok(Token {
+        access_token: token.access_token,
+        expires_at,
+        refresh_token: token.refresh_token
+    })
+}
+
+fn get_token_from_authenticate(client_id: &str, client_secret: &str, scope: &str) -> Result<Token, Box<dyn std::error::Error>> {
+    let data = authenticate(client_id, scope).unwrap();
+
+    let client = reqwest::blocking::Client::new();
+    let token_response = client.post("https://accounts.spotify.com/api/token")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", data.code.as_str()),
+            ("code_verifier", data.code_verifier.as_str()),
+            ("redirect_uri", REDIRECT_URI),
+        ])
+        .basic_auth(client_id, Some(client_secret))
+        .send().unwrap();
+
+    if token_response.status().is_client_error() {
+        eprintln!("client error. status: {}", token_response.status());
+        let body = token_response.text().unwrap();
+        eprintln!("body: {}", body);
+        return Err("client error".into());
+    }
+
+    let token = token_response.error_for_status().unwrap().text().unwrap();
+
+    println!("token response: {}", token);
+
+    let token: TokenResponse = serde_json::from_str(token.as_str()).unwrap();
+
+    let expires_at = std::time::SystemTime::now().checked_add(std::time::Duration::from_secs(token.expires_in)).unwrap();
+
+    Ok(Token {
+        access_token: token.access_token,
+        expires_at,
+        refresh_token: token.refresh_token
+    })
+}
+
+pub fn get_token(client_id: &str, client_secret: &str, scope: &str) -> Result<Token, Box<dyn std::error::Error>> {
+    let token = match load_token() {
+        Ok(t) => {
+            if t.expires_at > std::time::SystemTime::now() {
+                t
+            }
+            else {
+                get_token_from_refresh(client_id, client_secret, t.refresh_token.as_str())?
+            }
+        },
+        Err(_) => {
+            get_token_from_authenticate(client_id, client_secret, scope)?
+        }
+    }; 
+
+    store_token(&token)?;
+    
+    Ok(token)
 }

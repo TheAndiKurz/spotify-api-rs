@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let token = auth::get_token(&config.client_id, &config.client_secret, scope)?;
 
-    let playlists = playlist::my_playlists::get_my_playlists(&token)?;
+    let playlists = playlist::my_playlists::get_my_playlists(&token.access_token)?;
 
     for playlist in playlists.items {
         println!("{:?}", playlist.id);
