@@ -109,15 +109,15 @@ fn store_token(token: &Token) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn get_token_from_refresh(client_id: &str, client_secret: &str, refresh_token: &str) -> Result<Token, Box<dyn std::error::Error>> {
+fn get_token_from_refresh(client_id: &str, refresh_token: &str) -> Result<Token, Box<dyn std::error::Error>> {
     let client = reqwest::blocking::Client::new();
     let token_response = client.post("https://accounts.spotify.com/api/token")
         .body(format!("grant_type=refresh_token&refresh_token={}&client_id={}", refresh_token, client_id))
-        .bearer_auth(refresh_token)
+        .header("Content-Type", "application/x-www-form-urlencoded")
         .send()?;
 
     if token_response.status().is_client_error() {
-        eprintln!("client error. status: {}", token_response.status());
+        eprintln!("client error getting token from refresh_token. status: {}", token_response.status());
         let body = token_response.text()?;
         eprintln!("body: {}", body);
         return Err("client error".into());
@@ -179,9 +179,8 @@ pub fn get_token(client_id: &str, client_secret: &str, scope: &str) -> Result<To
         Ok(t) => {
             if t.expires_at > std::time::SystemTime::now() {
                 t
-            }
-            else {
-                get_token_from_refresh(client_id, client_secret, t.refresh_token.as_str())?
+            } else {
+                get_token_from_refresh(client_id, t.refresh_token.as_str())?
             }
         },
         Err(_) => {
